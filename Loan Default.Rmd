@@ -1,0 +1,122 @@
+---
+title: "Loan Default"
+author: "Andy Johns"
+date: "March 8, 2019"
+output: html_document
+---
+
+```{r message=FALSE}
+library(readr)
+library(dplyr)
+library(caret)
+library(MASS)
+library(pROC)
+```
+
+### Importing Data
+
+We first start by importing the data and adding a binary column called default to show which individuals default and those that do not.
+```{r}
+default <- read.csv("train_v3.csv")
+
+# We add a binary column to whether the individual has defaulted or not
+default$default <- ifelse(default$loss == 0, 0, ifelse(default$loss != 0, 1, NA))
+```
+
+### Cleaning Data
+
+We then apply a function to impute the median value of each column for missing values. Any column that has zero variance or is a duplicate is removed.
+```{r}
+# A function to add the median of each column to missing values
+default <- data.frame(lapply(default,function(x) {
+    if(is.numeric(x)) ifelse(is.na(x),median(x,na.rm=T),x) else x}))
+
+# A function to remove the columns with 0 variance
+default <- default[ - as.numeric(which(apply(default, 2, var) == 0))]
+head(default)
+
+# This removes the duplicate "id" number "X"
+default <- default[2:753]
+```
+
+### Correlation Reduction
+
+```{r}
+#Break the variables into x and y
+y <- default[752]
+x <- default[2:750]
+
+#Discover the correlation of each x variable to the y variable
+corr <- cor(x,y)
+plot(corr)
+```
+
+Here I turn the corr file into a dataframe and write it into my working directory. I manually open the file and add column names "variables" and "correlation" in this order. I then save the file and close it out.
+
+```{r}
+#Variable is not a column, manually wrote a file and made column names.
+corr <- as.data.frame(corr)
+
+write.csv(corr, file = "cor")
+```
+
+Next, I read the file back into the global environment. I then decide what I want my correlation cutoffs to be. I filter these values from the "correlation" dataframe and take these values, the id column, and the binary default values. These values are put into the prediction.file.
+
+```{r}
+correlation <- read.csv("cor")
+
+#Reduced variables to those with the most correlation
+correlation <- correlation %>% filter(correlation >= 0.085 | correlation <= -0.095)
+
+prediction.file <- default %>% dplyr::select(id, correlation$variables, default)
+```
+
+### Creating Training and Test Sets
+
+```{r}
+smp_size <- floor(0.80 * nrow(prediction.file))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(prediction.file)), size = smp_size)
+
+train <- prediction.file[train_ind, ]
+test <- prediction.file[-train_ind, ]
+```
+
+### Modeling and Further Variable Reduction
+
+```{r}
+# Fit the full model 
+full.model <- glm(default ~ ., family = binomial, data = train)
+summary(full.model)
+
+# Stepwise regression model
+step.model <- stepAIC(full.model, direction = "backward", 
+                      trace = FALSE)
+summary(step.model)
+```
+
+### Evaluating Results
+
+We now make predictions on the test data and see the model accuracy through the Roc Curve.
+
+```{r}
+predictions <- predict(full.model, test, type = "response")
+
+roc(test$default,predictions) 
+plot(roc(test$default, predictions), col='red', lwd=2)
+```
+
+Then we evaluate the amount of type 1 & 2 error with the confusion matrix.
+
+```{r}
+probability <- as.numeric(predictions > .08)
+
+Confusion_Matrix <- table(Predicted = probability, Actual = test$default)
+
+colnames(Confusion_Matrix) <- c("No", "Yes")
+rownames(Confusion_Matrix) <- c("No", "Yes")
+Confusion_Matrix
+```
+
