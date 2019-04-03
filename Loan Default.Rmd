@@ -11,7 +11,10 @@ library(dplyr)
 library(caret)
 library(MASS)
 library(pROC)
+library(FactoMineR)
+library(factoextra)
 ```
+
 
 ### Importing Data
 
@@ -19,7 +22,7 @@ We first start by importing the data and adding a binary column called default t
 ```{r}
 default <- read.csv("train_v3.csv")
 
-# We add a binary column to whether the individual has defaulted or not
+# We add a binary column to see whether the individual has defaulted or not
 default$default <- ifelse(default$loss == 0, 0, ifelse(default$loss != 0, 1, NA))
 ```
 
@@ -66,35 +69,72 @@ Next, I read the file back into the global environment. I then decide what I wan
 correlation <- read.csv("cor")
 
 #Reduced variables to those with the most correlation
-correlation <- correlation %>% filter(correlation >= 0.085 | correlation <= -0.095)
+correlation <- correlation %>% filter(correlation >= 0.05 | correlation <= -0.05)
 
-prediction.file <- default %>% dplyr::select(id, correlation$variables, default)
+prediction.file <- default %>% dplyr::select(correlation$variables, default)
+dim(prediction.file)
 ```
 
 ### Creating Training and Test Sets
 
+I create a training set for the 
 ```{r}
 smp_size <- floor(0.80 * nrow(prediction.file))
 
 ## set the seed to make your partition reproducible
-set.seed(123)
+set.seed(1)
 train_ind <- sample(seq_len(nrow(prediction.file)), size = smp_size)
 
 train <- prediction.file[train_ind, ]
 test <- prediction.file[-train_ind, ]
 ```
 
-### Modeling and Further Variable Reduction
+### Modeling Probability of Default 
 
+After reducing the variables with a correlation threshold, we ran a logistic regression and view the importance of each variable. We reduce the variables to only those with a coefficient greater than 2.
 ```{r}
 # Fit the full model 
 full.model <- glm(default ~ ., family = binomial, data = train)
-summary(full.model)
+var.imp <- varImp(full.model, scale = FALSE)
+var.imp
+```
+
+The reduced variables are then plugged back into the logistic regression model and the results are used in a step regression model to further reduce the variables. Important Variables: f8, f13, f599, f41, f51, f54, f65, f66, f75, f82, f143, f144, f221, f222, f243, f251, f259, f269, f270, f290, f330, f380, f381, f382, f392, f397, f404, f499, f563, f596, f598, f633, f664, f774. 
+
+```{r}
+full.model.reduced <- glm(default ~ f599+f598+f404+f397+f380+f381+f382+f392+f330+f290+f259+f269+f270+f222+f243+f251+f221+f143+f144+f75+f82+f41+f54+f65+f66+f8+f13+f774+f563+f596+f633+f499+f51+f664, family = binomial, data = train)
 
 # Stepwise regression model
-step.model <- stepAIC(full.model, direction = "backward", 
-                      trace = FALSE)
+step.model <- stepAIC(full.model.reduced, direction = "both", trace = FALSE)
 summary(step.model)
+```
+
+### Utilizing PCA
+
+Below we create the PCA model on the data and assign the results to the variable 'pca.model' 
+
+```{r}
+pca.model <- PCA(default)
+```
+
+We then create a Scree Plot to find the 'elbow' point percentage explained by dimensions. This point can be observed in the 4th dimension, so we will use the dimensions prior to this point, 1st-3rd dimensions. 
+
+```{r}
+fviz_eig(pca.model, addlabels = TRUE, ylim = c(0, 20))
+pca.model$eig
+```
+
+Next, we try to plot the contribution of the top 125 variables. The red line is the average contribution of all variables summed across the total dimensions. So in this plot, we are looking at the contribution of each variable across three dimensions. We can see the average contribution is roughly ~0.32%.
+
+```{r}
+fviz_contrib(pca.model,
+    choice = "var",
+    axes = 1:3,
+    top = 125)
+```
+
+```{r}
+pca.model$var$contrib
 ```
 
 ### Evaluating Results
@@ -102,21 +142,92 @@ summary(step.model)
 We now make predictions on the test data and see the model accuracy through the Roc Curve.
 
 ```{r}
-predictions <- predict(full.model, test, type = "response")
+p <- predict(step.model, test, type = "response")
 
-roc(test$default,predictions) 
+roc(test$default, p) 
 plot(roc(test$default, predictions), col='red', lwd=2)
 ```
 
 Then we evaluate the amount of type 1 & 2 error with the confusion matrix.
 
 ```{r}
-probability <- as.numeric(predictions > .08)
+probability <- as.numeric(predictions > .10)
 
+y_or_n <- ifelse(p > 0.05, "1", "0")
+test$default <- as.factor(test$default)
+
+# Convert to factor: p_class
+p_class <- factor(y_or_n, levels = levels(test[["default"]]))
+
+# Create confusion matrix
+cm <- confusionMatrix(p_class, test[["default"]])
+cm
 Confusion_Matrix <- table(Predicted = probability, Actual = test$default)
 
-colnames(Confusion_Matrix) <- c("No", "Yes")
-rownames(Confusion_Matrix) <- c("No", "Yes")
+colnames(cm) <- c("No", "Yes")
+rownames(cm) <- c("No", "Yes")
 Confusion_Matrix
+```
+
+### Modeling the Loss Given Default
+
+Now that we have evaluated each individuals probability of default, we try to predict the loss the bank will incur given an individual defaults. So the first step is reducing the default data to only those that have defaulted.
+
+```{r}
+defaulted <- default %>% filter(default == 1)
+```
+
+Next we reduce the variables to those that we have deemed important in our variable reduction step.
+
+```{r}
+defaulted <- defaulted %>% dplyr::select(id, f8, f13, f599, f41, f51, f54, f65, f66, f75, f82, f143, f144, f221, f222, f243, f251, f259, f269, f270, f290, f330, f380, f381, f382, f392, f397, f404, f499, f563, f596, f598, f633, f664, f774, loss, default)
+```
+
+```{r}
+defaulted <- data.frame(lapply(defaulted,function(x) {
+    if(is.numeric(x)) ifelse(is.na(x),median(x,na.rm=T),x) else x}))
+```
+
+### Random Forest Model
+
+The first modeling technique we will try is Random Forest. Prior to running the model we can create a custom tuneGrid, which always us to adjust hyperparameters easily.
+
+```{r}
+tuneGrid <- data.frame(
+  .mtry = c(2, 3, 7),
+  .splitrule = "variance",
+  .min.node.size = 5
+)
+```
+
+Below is the actually random forest model set to 5 fold cross-validation.
+
+```{r}
+model <- train(
+  loss ~ .,
+  tuneGrid = tuneGrid,
+  data = defaulted, 
+  method = "ranger",
+  trControl = trainControl(
+    method = "cv", 
+    number = 5, 
+    verboseIter = TRUE
+  )
+)
+model
+```
+
+### Boosting Model
+
+L (the loan capital) * I (the interest rate) * Y (the number of years i.e 5)*(1-PD)
+
+```{r}
+first.second.test <- read.csv("test_scenario1_2.csv")
+head(first.second.test)
+head(default)
+```
+
+```{r}
+sum(first.second.test$requested_loan)
 ```
 
