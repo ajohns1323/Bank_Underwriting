@@ -118,7 +118,7 @@ plot(roc(test$default, p), col='red', lwd=2)
 Then we evaluate the amount of type 1 & 2 error with the confusion matrix.
 
 ```{r}
-probability <- as.numeric(p > .08)
+probability <- as.numeric(p > .10)
 
 Confusion_Matrix <- table(Predicted = probability, Actual = test$default)
 
@@ -174,27 +174,6 @@ rf.model <- train(
 )
 ```
 
-### Boosting Model
-
-```{r}
-b.model <- train(
-  loss ~ .,
-  data = defaulted, 
-  method = "gbm",
-  trControl = trainControl(
-    method = "cv", 
-    number = 5, 
-    verboseIter = TRUE
-  )
-)
-```
-
-Expected Loss:
-PD * LGD * requested_loan + (1-PD) * Default 
-
-Expected Gain:
-(1 - PD) * 5 * .042 * requested_loan
-
 
 ### Scenario 1
 
@@ -214,25 +193,36 @@ first.second.test <- data.frame(lapply(first.second.test,function(x) {
 first.second.test <- first.second.test[ - as.numeric(which(apply(first.second.test, 2, var) == 0))]
 ```
 
+Now using the models we created earlier for probability of default and loss given default, we run them on the test data and add the results to the data frame.
+
 ```{r}
 scenario.1.2.pd <- predict(step.model, first.second.test, type = "response")
-first.second.test$PD <- scenario.1.results
+first.second.test$PD <- scenario.1.2.pd
 
 scenario.1.2.lgd <- predict(rf.model, first.second.test)
-first.second.test$LGD <- scenario.1.2.lgd
+first.second.test$LGD <- (scenario.1.2.lgd/100)
 ```
 
 The expected loss and expected gain are calculations are describe below:
 
 Expected Loss:
-PD * LGD * requested_loan + (1-PD) * Default 
+PD * LGD * requested_loan + (1-PD) * customer_default 
 
 Expected Gain:
 (1 - PD) * 5 * .042 * requested_loan
 
+Expected Gain, Expected Loss, and Customer Default are created and added to the data frame.
+
 ```{r}
-first.second.test <- first.second.test %>% mutate(expected_gain = (1 - PD) * 5 * .042 * requested_loan)
+first.second.test <- first.second.test %>% mutate(customer_default = ifelse(PD > .10, 1, 0), expected_gain = (1 - PD) * 5 * .042 * requested_loan, expected_loss = PD * LGD * requested_loan + (1-PD) * customer_default, opportunity = expected_gain - expected_loss)
 head(first.second.test)
+```
+
+```{r}
+scen.1.results <- first.second.test %>%
+  group_by(id, requested_loan) %>%
+  summarise(approve = ifelse(opportunity > 1000, 1, 0))
+head(scen.1.results)
 ```
 
 
@@ -241,12 +231,19 @@ head(first.second.test)
 The second scenario is similar to the first but now we have a budget of $450 million. We will use the same file we imported above 'first.second.test.' 
 
 ```{r}
+scen.2.int.results <- first.second.test %>%
+  group_by(id, requested_loan) %>%
+  summarise(approve = ifelse(opportunity > 13100, 1, 0))
 
+total.loan <- scen.2.int.results %>%
+  filter(approve == 1) 
+
+sum(total.loan$requested_loan)
 ```
 
 ### Scenario 3
 
-The third and final scenario, we are faced with a similar situation as the two above, but now each customer has a proposed interest rate. This will affect our expect gain calculation as it will vary from person to person.
+The third and final scenario, we are faced with a similar situation as the two above, but now each customer has a proposed interest rate. This will affect our expect gain calculation as it will vary from person to person. We will have the $1.4 billion budget as in the first scenario.
 
 ```{r}
 third.test <- read.csv("test_scenario3.csv")
@@ -261,6 +258,14 @@ third.test <- data.frame(lapply(third.test,function(x) {
 third.test <- third.test[ - as.numeric(which(apply(third.test, 2, var) == 0))]
 ```
 
+```{r}
+scenario.3.pd <- predict(step.model, third.test, type = "response")
+third.test$PD <- scenario.3.pd
+
+scenario.3.lgd <- predict(rf.model, third.test)
+third.test$LGD <- (scenario.3.lgd/100)
+```
+
 Expected Loss:
 PD * LGD * requested_loan + (1-PD) * Default 
 
@@ -268,6 +273,22 @@ Expected Gain:
 (1 - PD) * 5 * Proposed_Intrest_Rate * requested_loan
 
 ```{r}
+third.test <- third.test %>% mutate(customer_default = ifelse(PD > .10, 1, 0), expected_gain = (1 - PD) * 5 * Proposed_Intrest_Rate * requested_loan, expected_loss = PD * LGD * requested_loan + (1-PD) * customer_default, opportunity = expected_gain - expected_loss)
 head(third.test)
+```
+
+```{r}
+scen.3.results <- third.test %>%
+  group_by(id) %>%
+  summarise(approve = ifelse(opportunity > 1000, 1, 0))
+head(scen.3.results)
+```
+
+Write the results to three seperate csv files.
+
+```{r}
+write.csv(scen.1.results, file = "G3_S1.csv")
+write.csv(scen.2.results, file = "G3_S2.csv")
+write.csv(scen.3.results, file = "G3_S3.csv")
 ```
 
